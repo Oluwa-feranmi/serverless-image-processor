@@ -1,0 +1,42 @@
+{
+    "Comment": "Serverless Image Processing Workflow",
+    "StartAt": "DetectFaces",
+    "States": {
+        "DetectFaces": {
+            "Type": "Task",
+            "Resource": "${FaceDetectionLambdaArn}",
+            "Parameters": {
+                "bucket.$": "$.detail.bucket.name",
+                "key.$": "$.detail.object.key"
+            },
+            "ResultPath": "$.processing_result",
+            "Next": "StoreMetadata"
+        },
+        "StoreMetadata": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:putItem",
+            "Parameters": {
+                "TableName": "${DynamoDBTableName}",
+                "Item": {
+                    "image_id": {
+                        "S.$": "$.processing_result.image_key"
+                    },
+                    "bucket": {
+                        "S.$": "$.processing_result.bucket"
+                    },
+                    "face_detected": {
+                        "BOOL.$": "$.processing_result.face_detected"
+                    },
+                    "face_count": {
+                        "N.$": "States.JsonToString($.processing_result.face_count)"
+                    },
+                    "processed_at": {
+                        "S.$": "$$.Execution.StartTime"
+                    }
+                }
+            },
+            "ResultPath": "$.dynamodb_result",
+            "End": true
+        }
+    }
+}

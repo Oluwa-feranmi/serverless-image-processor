@@ -1,0 +1,6 @@
+# AWS specific
+*.pem
+.DS_Store
+__pycache__/
+*.swp
+*.swo

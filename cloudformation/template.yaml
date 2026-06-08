@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "serverless-image-detection"
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    Description: An environment name that will be prefixed to resource names
+    AllowedValues: 
+       - dev
+       - staging
+       - prod
+  
+  EmailAddress:
+    Type: String
+    Description: Email address to receive image detection notifications
+
+  DynamoDBTable:
+    Type: String
+    Default: ImageTable
+    Description: Name of the DynamoDB table to store image metadata
+    
+Resources:
+  # DynamoDB table for image metadata
+  ImageTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref DynamoDBTable
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  # S3 bucket for uploaded images
+  ImageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+
+  # SNS topic for image detection notifications
+  ImageDetectionTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${EnvironmentName}-image-detection-topic"
+
+  # SNS Email Subscription
+  ImageDetectionSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ImageDetectionTopic
+      Protocol: email
+      Endpoint: !Ref EmailAddress
+
+  # IAM role for the Lambda function
+  ImageDetectionFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-image-detection-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ImageDetectionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${ImageBucket}/*"
+              - Effect: Allow
+                Action:
+                  - rekognition:DetectLabels
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt ImageTable.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref ImageDetectionTopic
+
+  # Lambda function for image detection
+  ImageDetectionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${EnvironmentName}-image-detection-function"
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref DynamoDBTable
+          SNS_TOPIC_ARN: !Ref ImageDetectionTopic
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import uuid
+
+          rekognition = boto3.client('rekognition')
+          dynamodb = boto3.resource('dynamodb')
+          sns = boto3.client('sns')
+
+          def lambda_handler(event, context):
+              bucket = event['detail']['bucket']['name']
+              key = event['detail']['object']['key']
+
+              rekognition_response = rekognition.detect_labels(
+                  Image={'S3Object': {'Bucket': bucket, 'Name': key}},
+                  MaxLabels=10,
+                  MinConfidence=75
+              )
+              labels = [{'Name': l['Name'], 'Confidence': str(l['Confidence'])} for l in rekognition_response['Labels']]
+
+              table = dynamodb.Table(os.environ['DYNAMODB_TABLE'])
+              table.put_item(Item={
+                  'id': str(uuid.uuid4()),
+                  'bucket': bucket,
+                  'key': key,
+                  'labels': labels
+              })
+
+              sns.publish(
+                  TopicArn=os.environ['SNS_TOPIC_ARN'],
+                  Subject='Image Detection Complete',
+                  Message=json.dumps({'bucket': bucket, 'key': key, 'labels': labels})
+              )
+
+              return {'statusCode': 200, 'body': json.dumps({'labels': labels})}
+      Role: !GetAtt ImageDetectionFunctionRole.Arn
+      Timeout: 30
+
+  # IAM role for Step Functions
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-image-detection-stepfunctions-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt ImageDetectionFunction.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: "*"
+
+  # Step Functions State Machine
+  StepFunctions:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${EnvironmentName}-image-detection-statemachine"
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString:
+        Fn::Sub:
+          - |
+            {
+              "Comment": "Image Detection Workflow",
+              "StartAt": "DetectLabels",
+              "States": {
+                "DetectLabels": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${LambdaArn}",
+                    "Payload.$": "$"
+                  },
+                  "End": true
+                }
+              }
+            }
+          - LambdaArn: !GetAtt ImageDetectionFunction.Arn
+
+  # EventBridge rule to trigger Lambda on S3 object creation
+  ImageUploadEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - !Sub "${EnvironmentName}-images-bucket"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ImageDetectionFunction.Arn
+          Id: ImageDetectionFunction
+
+  # Permission for EventBridge to invoke Lambda
+  ImageDetectionFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ImageDetectionFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ImageUploadEventRule.Arn
