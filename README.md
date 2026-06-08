@@ -30,20 +30,17 @@ Real-time email notifications via SNS
 Infrastructure as Code using CloudFormation
 
 ## Repository Structure
-serverless-image-processor/
-├── lambda/
-│   ├── face_detection.py
-│   └── requirements.txt
-├── step-functions/
-│   └── workflow.asl.json
-├── cloudformation/
-│   └── template.yaml
-├── tests/
-│   └── test-images/
-├── screenshots/
-├── deploy.sh
-├── teardown.sh
-└── README.md
+| Path | Description |
+| --- | --- |
+| ``lambda/lambda_function.py`` | Lambda function for face detection logic |
+| ``lambda/requirements.txt`` | Python dependencies for the Lambda function |
+| ``step-functions/workflow.asl.json`` | AWS Step Functions state machine definition |
+| ``cloudformation/template.yaml`` | CloudFormation template for provisioning resources |
+| ``tests/test-images/`` | Test images used for validation |
+| ``screenshots/`` | Screenshots for documentation or demo |
+| ``deploy.sh`` | Deployment script |
+| ``teardown.sh`` | Teardown/cleanup script |
+| ``README.md`` | Main project documentation |
 
 ## Deployment
 ```bash
